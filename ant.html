@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>星尘蚁群：星系寻路</title>
+<style>
+  body {
+    margin: 0;
+    overflow: hidden;
+    background-color: #010005;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  canvas { display: block; }
+  
+  .ui {
+    position: absolute;
+    top: 30px; left: 30px;
+    color: rgba(200, 230, 255, 0.7);
+    pointer-events: none;
+    text-shadow: 0 0 15px rgba(100, 200, 255, 0.8);
+  }
+  .ui h1 { margin: 0 0 10px 0; font-size: 20px; font-weight: 300; letter-spacing: 0.1em; }
+  .ui p { margin: 0; font-size: 13px; opacity: 0.5; letter-spacing: 0.05em; }
+  .status {
+    position: absolute;
+    bottom: 30px; left: 30px;
+    color: #00e5ff;
+    font-family: monospace;
+    font-size: 14px;
+    pointer-events: none;
+    letter-spacing: 0.1em;
+  }
+</style>
+</head>
+<body>
+
+<div class="ui">
+  <h1>星尘蚁群</h1>
+  <p>点击深空投放高能星糖，观察星云生命体的寻路本能。</p>
+</div>
+<div class="status" id="status">已连接星系网络...</div>
+
+<!-- 引入 Three.js 与后期处理库 -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+// ==========================================
+// 1. 基础场景设置
+// ==========================================
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000000, 0.0015); // 深空雾效
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
+camera.position.set(0, 150, 300);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+
+// 视角控制
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.enableZoom = false;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.5;
+controls.maxPolarAngle = Math.PI / 2 + 0.2;
+controls.minPolarAngle = Math.PI / 2 - 0.2;
+
+// ==========================================
+// 2. 后期处理（Bloom 发光特效）
+// ==========================================
+const renderScene = new RenderPass(scene, camera);
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.8, 0.4, 0.85);
+bloomPass.threshold = 0.1;
+bloomPass.strength = 2.2; 
+bloomPass.radius = 0.8;   
+
+const composer = new EffectComposer(renderer);
+composer.addPass(renderScene);
+composer.addPass(bloomPass);
+
+// ==========================================
+// 3. 核心参数与着色器
+// ==========================================
+const PARTICLE_COUNT = 8000; 
+const NEST_POS = new THREE.Vector3(0, 0, 0); 
+const MAX_SUGARS = 3;
+
+let particles = [];
+let sugars = [];
+
+// 顶点着色器：控制大小和颜色
+const vertexShader = `
+  attribute float size;
+  attribute vec3 customColor;
+  varying vec3 vColor;
+  void main() {
+    vColor = customColor;
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = size * (300.0 / -mvPosition.z);
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+
+// 片元着色器：核心亮，边缘透明柔和
+const fragmentShader = `
+  varying vec3 vColor;
+  void main() {
+    float dist = length(gl_PointCoord - vec2(0.5));
+    if (dist > 0.5) discard;
+    float alpha = smoothstep(0.5, 0.0, dist);
+    vec3 finalColor = vColor * (1.0 + pow(alpha, 4.0) * 2.0);
+    gl_FragColor = vec4(finalColor, alpha);
+  }
+`;
+
+// ==========================================
+// 4. 生成星尘蚁群
+// ==========================================
+const geometry = new THREE.BufferGeometry();
+const positions = new Float32Array(PARTICLE_COUNT * 3);
+const colors = new Float32Array(PARTICLE_COUNT * 3);
+const sizes = new Float32Array(PARTICLE_COUNT);
+
+const COLOR_SEEK = new THREE.Color(0x00e5ff); 
+const COLOR_CARRY = new THREE.Color(0xff00ff); 
+const COLOR_IDLE = new THREE.Color(0x1a3355); 
+
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+  const r = Math.random() * 200 + 50;
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos((Math.random() * 2) - 1);
+  
+  positions[i * 3] = Math.sin(phi) * Math.cos(theta) * r;
+  positions[i * 3 + 1] = Math.sin(phi) * Math.sin(theta) * r * 0.4; 
+  positions[i * 3 + 2] = Math.cos(phi) * r;
+
+  colors[i * 3] = COLOR_IDLE.r;
+  colors[i * 3 + 1] = COLOR_IDLE.g;
+  colors[i * 3 + 2] = COLOR_IDLE.b;
+
+  sizes[i] = Math.random() * 3 + 1;
+
+  particles.push({
+    id: i,
+    pos: new THREE.Vector3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]),
+    vel: new THREE.Vector3((Math.random()-0.5)*2, (Math.random()-0.5)*2, (Math.random()-0.5)*2),
+    state: 'seek', 
+    targetSugar: null,
+    maxSpeed: Math.random() * 2 + 1.5,
+  });
+}
+
+geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geometry.setAttribute('customColor', new THREE.BufferAttribute(colors, 3));
+geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+const particleMaterial = new THREE.ShaderMaterial({
+  vertexShader: vertexShader,
+  fragmentShader: fragmentShader,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending 
+});
+
+const particleSystem = new THREE.Points(geometry, particleMaterial);
+scene.add(particleSystem);
+
+// ==========================================
+// 5. 重塑中心：由星尘构成的吸积盘
+// ==========================================
+// 不再使用实心球或圆盘，而是用 3000 颗细小的粒子构成旋转的引力漩涡
+const CORE_COUNT = 3000;
+const coreGeo = new THREE.BufferGeometry();
+const corePositions = new Float32Array(CORE_COUNT * 3);
+const coreColors = new Float32Array(CORE_COUNT * 3);
+const coreSizes = new Float32Array(CORE_COUNT);
+
+const coreColorInner = new THREE.Color(0xffffff); // 中心高温白
+const coreColorOuter = new THREE.Color(0x0055ff); // 外围深空蓝
+
+for (let i = 0; i < CORE_COUNT; i++) {
+  // 极坐标分布，半径集中在 10 到 60 之间
+  const r = 10 + Math.random() * 50;
+  const theta = Math.random() * Math.PI * 2;
+  // 高度稍微有点起伏，形成立体吸积盘
+  const y = (Math.random() - 0.5) * Math.sin(r * 0.1) * 5; 
+  
+  corePositions[i * 3] = Math.cos(theta) * r;
+  corePositions[i * 3 + 1] = y;
+  corePositions[i * 3 + 2] = Math.sin(theta) * r;
+
+  // 越靠内越亮越白，越靠外越偏蓝
+  const ratio = (r - 10) / 50;
+  const c = coreColorInner.clone().lerp(coreColorOuter, ratio);
+  // 降低一点亮度，免得被 Bloom 糊成一个白团
+  c.multiplyScalar(0.6 + Math.random() * 0.4); 
+  
+  coreColors[i * 3] = c.r;
+  coreColors[i * 3 + 1] = c.g;
+  coreColors[i * 3 + 2] = c.b;
+
+  coreSizes[i] = Math.random() * 1.5 + 0.5;
+}
+
+coreGeo.setAttribute('position', new THREE.BufferAttribute(corePositions, 3));
+coreGeo.setAttribute('customColor', new THREE.BufferAttribute(coreColors, 3));
+coreGeo.setAttribute('size', new THREE.BufferAttribute(coreSizes, 1));
+
+const coreMat = new THREE.ShaderMaterial({
+  vertexShader: vertexShader,
+  fragmentShader: fragmentShader,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+
+const coreSystem = new THREE.Points(coreGeo, coreMat);
+scene.add(coreSystem);
+
+// ==========================================
+// 6. 星糖（食物）的生成
+// ==========================================
+const sugarGeo = new THREE.OctahedronGeometry(5, 0);
+const sugarMat = new THREE.MeshBasicMaterial({ color: 0xffcc00, wireframe: true });
+const sugarInnerMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+function createSugar(x, y, z) {
+  const group = new THREE.Group();
+  const core = new THREE.Mesh(new THREE.SphereGeometry(2, 16, 16), sugarInnerMat);
+  const outer = new THREE.Mesh(sugarGeo, sugarMat);
+  group.add(core);
+  group.add(outer);
+  group.position.set(x, y, z);
+  scene.add(group);
+
+  return {
+    mesh: group,
+    pos: group.position,
+    energy: 300, 
+    dead: false,
+    phase: Math.random() * Math.PI * 2
+  };
+}
+
+// ==========================================
+// 7. 鼠标交互
+// ==========================================
+const raycaster = new THREE.Raycaster();
+const mouseVec = new THREE.Vector2();
+const clickPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+
+let isDragging = false;
+let startX, startY;
+
+window.addEventListener('pointerdown', (e) => {
+  isDragging = false; 
+  startX = e.clientX; 
+  startY = e.clientY;
+});
+
+window.addEventListener('pointermove', (e) => {
+  if (Math.abs(e.clientX - startX) > 5 || Math.abs(e.clientY - startY) > 5) {
+    isDragging = true;
+  }
+});
+
+window.addEventListener('pointerup', (e) => {
+  if (isDragging) return;
+  if (sugars.filter(s => !s.dead).length >= MAX_SUGARS) return;
+
+  mouseVec.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouseVec.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouseVec, camera);
+
+  const target = new THREE.Vector3();
+  if (raycaster.ray.intersectPlane(clickPlane, target)) {
+    target.clampLength(50, 250);
+    sugars.push(createSugar(target.x, target.y, target.z));
+    updateUI();
+  }
+});
+
+function updateUI() {
+  const active = sugars.filter(s => !s.dead).length;
+  document.getElementById('status').textContent = `活跃星糖: ${active} / ${MAX_SUGARS}`;
+}
+
+// ==========================================
+// 8. 主循环：群体行为与渲染
+// ==========================================
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.1);
+  const time = clock.getElapsedTime();
+
+  // 核心吸积盘自转
+  coreSystem.rotation.y -= 0.01;
+  coreSystem.rotation.z = Math.sin(time * 0.5) * 0.1; // 微微倾斜摆动
+
+  // 星糖呼吸动画
+  sugars.forEach(s => {
+    if (s.dead) return;
+    s.mesh.rotation.y += 0.02;
+    s.mesh.rotation.x += 0.01;
+    s.phase += 0.05;
+    s.mesh.scale.setScalar(1 + Math.sin(s.phase) * 0.2);
+  });
+
+  const posAttr = geometry.attributes.position;
+  const colorAttr = geometry.attributes.customColor;
+  
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const p = particles[i];
+    
+    let targetPos = NEST_POS.clone();
+    let targetColor = COLOR_IDLE;
+
+    // --- 逻辑判断 ---
+    if (p.state === 'seek') {
+      let closestDist = Infinity;
+      let closestSugar = null;
+      
+      sugars.forEach(s => {
+        if (s.dead) return;
+        const d = p.pos.distanceTo(s.pos);
+        if (d < closestDist) {
+          closestDist = d;
+          closestSugar = s;
+        }
+      });
+
+      p.targetSugar = closestSugar;
+
+      if (closestSugar) {
+        targetPos = closestSugar.pos;
+        targetColor = COLOR_SEEK;
+        
+        // 碰到星糖
+        if (closestDist < 10) {
+          p.state = 'carry';
+          closestSugar.energy -= 1;
+          if (closestSugar.energy <= 0) {
+            closestSugar.dead = true;
+            scene.remove(closestSugar.mesh);
+          }
+        }
+      } else {
+        // 没有糖，围绕中心吸积盘外围游荡
+        const angle = Math.atan2(p.pos.z, p.pos.x) + 0.05;
+        const radius = Math.max(80, p.pos.length()); // 保持在外围
+        targetPos.set(Math.cos(angle) * radius, p.pos.y * 0.95, Math.sin(angle) * radius);
+        targetColor = COLOR_IDLE;
+      }
+
+    } else if (p.state === 'carry') {
+      targetPos = NEST_POS;
+      targetColor = COLOR_CARRY;
+
+      // 回到中心区域（吸积盘边缘）
+      if (p.pos.length() < 30) {
+        p.state = 'seek';
+        // 重新获得速度甩出去
+        p.vel.set((Math.random()-0.5)*6, (Math.random()-0.5)*6, (Math.random()-0.5)*6);
+      }
+    }
+
+    // --- 运动学 ---
+    const dir = targetPos.clone().sub(p.pos);
+    const dist = dir.length();
+    if (dist > 0) {
+      dir.normalize();
+      let force = p.state === 'carry' ? 0.35 : 0.15;
+      p.vel.addScaledVector(dir, force);
+
+      // 寻找时的切向力，制造盘旋
+      if (p.state === 'seek' && !p.targetSugar) {
+        const tangent = new THREE.Vector3(-p.pos.z, 0, p.pos.x).normalize();
+        p.vel.addScaledVector(tangent, 0.12);
+      }
+    }
+
+    if (p.vel.length() > p.maxSpeed) {
+      p.vel.normalize().multiplyScalar(p.maxSpeed);
+    }
+
+    p.pos.addScaledVector(p.vel, dt * 60);
+
+    if (p.pos.length() > 400) {
+      p.vel.multiplyScalar(-0.5);
+    }
+
+    posAttr.setXYZ(i, p.pos.x, p.pos.y, p.pos.z);
+    
+    // 平滑变色
+    const currentColor = new THREE.Color(colorAttr.getX(i), colorAttr.getY(i), colorAttr.getZ(i));
+    currentColor.lerp(targetColor, 0.1); 
+    colorAttr.setXYZ(i, currentColor.r, currentColor.g, currentColor.b);
+  }
+
+  posAttr.needsUpdate = true;
+  colorAttr.needsUpdate = true;
+
+  controls.update();
+  composer.render();
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+});
+
+updateUI();
+animate();
+</script>
+</body>
+</html>
